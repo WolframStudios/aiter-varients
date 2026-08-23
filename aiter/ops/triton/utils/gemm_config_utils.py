@@ -31,7 +31,14 @@ def resolve_config_dir(
     """Return (cfg_dir, name_prefix) for the first candidate whose default
     file exists: DEFAULT.json when name_prefix is empty (the nested layout,
     dir from _dtype_dir()), else <name_prefix><config_name>.json. Falls back
-    to the last candidate so the missing-file assertion names a legacy path."""
+    to the last candidate so the caller's missing-file assertion names a
+    real probe path.
+
+    legacy_dir appends the legacy flat arch-prefixed candidates under
+    configs/<legacy_dir>/. GEMM no longer passes it (configs/gemm/ holds no
+    GEMM families); it is reserved for the future MOE unification
+    (configs/CLAUDE.md section 5).
+    """
     dtype_dir = _dtype_dir(config_name)
     dev = arch_info.get_arch()
     arch_prefix = f"{dev}-"
@@ -89,8 +96,8 @@ def _get_gemm_config_cached(
     callers can freely mutate the returned dict without polluting the cache.
 
     Resolves from ``<arch>/<backend>/gemm/<d_type>/`` (prefix-less filenames,
-    default named ``DEFAULT.json``) first; ``backend=None`` tries triton then
-    gluon. Falls back to the legacy flat ``gemm/`` layout (arch-prefixed) for unmigrated configs.
+    default named ``DEFAULT.json``); ``backend=None`` tries triton then
+    gluon. The legacy flat ``gemm/`` layout is no longer consulted.
     """
     # Input validation
     assert M >= 0, "M must be positive."
@@ -102,13 +109,10 @@ def _get_gemm_config_cached(
         and all(x < y for x, y in itertools.pairwise(bounds))
     ), "When provided, bounds must be a non-empty tuple of strictly increasing positive numbers."
 
-    # Nested layout <arch>/<backend>/gemm/<d_type>/ (no arch prefix, default
-    # named DEFAULT.json) first, then legacy flat gemm/ (arch-prefixed) for
-    # unmigrated configs; the shared probe lives in resolve_config_dir().
-    # TODO(satya): drop legacy_dir="gemm" once all configs are migrated.
-    cfg_dir, name_prefix = resolve_config_dir(
-        "gemm", config_name, backend=backend, legacy_dir="gemm"
-    )
+    # Nested layout <arch>/<backend>/gemm/<d_type>/ only (no arch prefix,
+    # default named DEFAULT.json); the shared probe lives in
+    # resolve_config_dir().
+    cfg_dir, name_prefix = resolve_config_dir("gemm", config_name, backend=backend)
     default_stem = f"{name_prefix}{config_name}" if name_prefix else "DEFAULT"
 
     # Load default config (must exist)
@@ -176,7 +180,7 @@ def get_gemm_config(
 
     This function provides a unified way to load GEMM configs across all kernels.
     It uses the following logic:
-    1. Load default config file: <d_type>/DEFAULT.json (legacy: {arch}-{config_name}.json)
+    1. Load default config file: <d_type>/DEFAULT.json
     2. If B, N and K are provided, try B-specialized config: {config_name}-B={B}-N={N}-K={K}.json
     3. If N and K are provided, try to load specialized config: {config_name}-N={N}-K={K}.json
        Or if specialized_filename is provided, use: {config_name}-{specialized_filename}.json

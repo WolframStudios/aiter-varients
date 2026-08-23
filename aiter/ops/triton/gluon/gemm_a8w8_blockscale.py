@@ -992,7 +992,7 @@ def _get_config_cached(
         )
 
     cfg_dir, prefix = resolve_config_dir(
-        "gemm", "GEMM-A8W8_BLOCKSCALE", backend="gluon", legacy_dir="gemm"
+        "gemm", "GEMM-A8W8_BLOCKSCALE", backend="gluon"
     )
 
     # Try specialized config first.

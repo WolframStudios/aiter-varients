@@ -10,8 +10,9 @@ Out of scope, do not touch without an explicit request: `configs/conv/`,
 of `configs/`. They have their own loaders and are unaffected by anything here.
 
 The tree is **mid-migration** from a flat, arch-prefixed layout to a nested
-`<arch>/<backend>/<op>/<d_type>/` layout. Both layouts are live, but **the legacy flat
-layout is deprecated and will be removed** — treat it as read-only history, not
+`<arch>/<backend>/<op>/<d_type>/` layout. GEMM is fully migrated: the legacy
+flat GEMM layout is **removed** and `configs/gemm/` no longer resolves. MOE
+still lives in the legacy flat layout — treat it as read-only history, not
 as a place to add things.
 
 Two non-negotiables:
@@ -22,10 +23,8 @@ Two non-negotiables:
 2. **New configs go in the target layout** unless their family is still in the
    legacy directory (see §6).
 
-`GEMM-AFP4WFP4` (gfx950 triton, gfx950/gfx1250 gluon) and
-`GEMM-AFP4WFP4_PRESHUFFLED` (gfx950/gfx1250 triton) are the migrated
-families; `GEMM-AFP4WFP4` is the worked reference — copy its shape when in
-doubt.
+Every GEMM family is migrated; `GEMM-AFP4WFP4` is the worked reference —
+copy its shape when in doubt.
 
 ---
 
@@ -57,11 +56,9 @@ The `<arch>/<backend>/moe/` directories exist but are empty, held open with
 `.gitkeep`. Keep them. **No MOE config has been migrated and no MOE resolver
 understands the nested layout yet** — see §5.
 
-### Legacy layout — deprecated, pending removal
+### Legacy layout — MOE only, deprecated
 
 ```
-configs/gemm/<arch>-<CONFIG_NAME>[-<suffix>].json
-configs/gemm/gluon/<arch>-<CONFIG_NAME>[-<suffix>].json
 configs/moe/<arch>-MOE-<dtype_str>.json
 configs/moe/<arch>-A8W4.json
 configs/moe/<arch>-MOE_ROUTING_SIGMOID_TOPK1.json
@@ -70,47 +67,44 @@ configs/moe/<arch>-MOE_ROUTING_SIGMOID_TOPK1.json
 Regenerate rather than trusting this listing:
 `git ls-tree -r --name-only HEAD aiter/ops/triton/configs/`
 
-Still authoritative for every family not yet migrated. For GEMM it is reached
-through the fallback chain in §2; for MOE it is the *only* path that works.
-The GEMM fallback is temporary — anything left in `configs/gemm/` when the
-legacy candidates are dropped from `gemm_config_utils.py` will stop resolving.
+Still authoritative for MOE — the *only* path that works there. The legacy
+flat GEMM layout (`configs/gemm/<arch>-...`, `configs/gemm/gluon/<arch>-...`)
+is **removed**: every GEMM family is migrated and `gemm_config_utils.py` no
+longer probes `configs/gemm/`, so anything placed there will not resolve.
 
 ---
 
 ## 2. GEMM resolution order — `get_gemm_config()`
 
 `utils/gemm_config_utils.py` picks a directory by probing for the *default*
-config file (`DEFAULT.json` in the nested layout, `<arch>-<CONFIG_NAME>.json`
-in legacy) in order and taking the first hit. Specialized files are then read
-from that same directory.
+config file (`DEFAULT.json`) in order and taking the first hit. Specialized
+files are then read from that same directory.
 
 **`backend=None`** (what every caller uses today):
 
 1. `configs/<arch>/triton/gemm/<d_type>/DEFAULT.json`
 2. `configs/<arch>/gluon/gemm/<d_type>/DEFAULT.json`
-3. `configs/gemm/<arch>-<CONFIG_NAME>.json`  *(legacy)*
 
 **`backend="triton"|"gluon"`**:
 
 1. `configs/<arch>/<backend>/gemm/<d_type>/DEFAULT.json`
-2. `configs/gemm/<backend>/<arch>-<CONFIG_NAME>.json`  *(legacy)*
-3. `configs/gemm/<arch>-<CONFIG_NAME>.json`  *(legacy)*
 
-If nothing matches, the last legacy candidate is used and the missing-default
-assertion fires there — so error messages still point at `configs/gemm/`.
+If nothing matches, the last candidate is used and the missing-default
+assertion fires there — so error messages name the nested path.
 
-The legacy candidates are marked `# TODO(satya): legacy, remove` and are
-scheduled for deletion. Do not write new code that depends on them resolving.
+The legacy flat `configs/gemm/` fallback has been removed. The probe lives in
+`resolve_config_dir()`, whose `legacy_dir` parameter is reserved for the MOE
+unification (§5); GEMM does not pass it.
 
 Consequences to keep in mind:
 
 - **A directory is chosen as a unit.** The unit is the family's `<d_type>/`
   directory. Splitting a config family across `<arch>/triton/gemm/<d_type>/`
-  and legacy `configs/gemm/` silently drops the specialized files in whichever
-  directory loses the probe. Move a family wholesale or not at all. Worse: a
-  `<d_type>/` directory with specialized files but **no `DEFAULT.json` is
-  invisible** — the probe keys only on `DEFAULT.json` and falls through to
-  legacy, ignoring everything in the directory.
+  and `<arch>/gluon/gemm/<d_type>/` silently drops the specialized files in
+  whichever directory loses the probe. Move a family wholesale or not at all.
+  Worse: a `<d_type>/` directory with specialized files but **no
+  `DEFAULT.json` is invisible** — the probe keys only on `DEFAULT.json` and
+  skips the directory, ignoring everything in it.
 - **`backend=None` prefers `triton` over `gluon`.** On an arch with only a
   gluon default (currently gfx1250 `GEMM-AFP4WFP4`), lookup falls through to
   gluon. Adding `configs/gfx1250/triton/gemm/gemm_afp4wfp4/DEFAULT.json` later
@@ -123,11 +117,11 @@ Consequences to keep in mind:
   instead).
 
 Direct-path loaders bypass the resolver's directory probe. Grep for
-`f"{AITER_TRITON_CONFIGS_PATH}/..."` before moving anything —
-`gluon/gemm_a8w8_blockscale.py` still builds legacy `gemm/gluon/` paths by
-hand (via `load_config_json`) and must be edited when its configs move.
-`gluon/gemm_a8w8.py` and `gluon/gemm_afp4wfp4.py` go through
-`get_gemm_config(backend="gluon")` and need no changes.
+`f"{AITER_TRITON_CONFIGS_PATH}/..."` before moving anything — none should
+remain for GEMM: `gluon/gemm_a8w8_blockscale.py` resolves its directory via
+`resolve_config_dir("gemm", ..., backend="gluon")` (only its bucket walk is
+custom), and `gluon/gemm_a8w8.py` / `gluon/gemm_afp4wfp4.py` go through
+`get_gemm_config(backend="gluon")`.
 
 ---
 
@@ -257,9 +251,9 @@ are — the loader finds and parses the file, each caller keeps interpreting its
 own structure. Converging the schemas is a separate, later decision (it would
 touch every MOE config file and require re-validating dispatch on every arch).
 
-**Step 1 — extract the shared probe.** The candidate-directory logic currently
-inlined in `_get_gemm_config_cached()` becomes a helper in `utils/`, parameterised
-on `<op>`:
+**Step 1 — extract the shared probe** *(done — `resolve_config_dir()` in
+`gemm_config_utils.py`)*. The candidate-directory logic once inlined in
+`_get_gemm_config_cached()` is a helper parameterised on `<op>`:
 
 ```python
 def resolve_config_dir(op: str, config_name: str, backend: str | None = None,
@@ -282,9 +276,10 @@ Candidates for `op="moe"`, mirroring §2:
 `MOE-FP8_W8A8` → `moe_fp8_w8a8`, `A8W4` → `a8w4`,
 `MOE_ROUTING_SIGMOID_TOPK1` → `moe_routing_sigmoid_topk1`.
 
-`gemm_config_utils.py` is then refactored onto the same helper with `op="gemm"`
-and `legacy_dir="gemm"` — behaviour-identical, and the legacy candidates stay
-tagged `# TODO(satya): legacy, remove` so both ops retire together.
+`gemm_config_utils.py` is refactored onto the same helper with `op="gemm"` and
+no `legacy_dir` — the GEMM legacy fallback is removed. The `legacy_dir`
+candidates (still tagged `# TODO(satya): legacy, remove`) now exist solely for
+MOE and retire when MOE finishes migrating.
 
 **Step 2 — the loader.**
 
@@ -359,9 +354,9 @@ legacy form if a step is ambiguous.
    migrated family must be fully described by its config files.
 7. **Verify** on the target arch: config resolves, `is_tuned` is `True` for a
    shape that has a specialized file, and numerics are unchanged.
-8. Leave the `# TODO(satya): legacy, remove` markers in `gemm_config_utils.py`
-   until `configs/gemm/` is empty. Deleting the legacy fallback is the final
-   step of the migration, not an intermediate one.
+8. Done: `configs/gemm/` is empty of GEMM families and the legacy fallback is
+   deleted from the GEMM resolution path. `resolve_config_dir()` keeps its
+   `legacy_dir` support only for the future MOE unification (§5).
 
 ### Adding a *new* tuned config (no migration)
 
@@ -369,10 +364,8 @@ legacy form if a step is ambiguous.
   target layout, inside the family's `<d_type>/` directory (`DEFAULT.json`
   for the default; specialized files keep the config-name stem, no arch
   prefix).
-- **GEMM**, family still in `configs/gemm/` → add to `configs/gemm/` with the
-  arch prefix, and consider migrating the whole family in the same PR. Never
-  create a lone nested file for a family whose default lives in legacy; the
-  directory probe picks one directory and ignores the other.
+- **GEMM** → never `configs/gemm/`; the resolver no longer probes it, so a
+  file added there will not resolve.
 - **MOE** → `configs/moe/` with the arch prefix, matching the schema of the
   loader that will read it. The nested layout is not wired up for MOE.
 

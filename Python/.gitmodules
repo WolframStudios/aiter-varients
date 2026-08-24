@@ -1,0 +1,3 @@
+[submodule "3rdparty/composable_kernel"]
+	path = Python/3rdparty/composable_kernel
+	url = https://github.com/WolframStudios/composable_kernel-varients.git
